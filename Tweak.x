@@ -1,8 +1,4 @@
-#import <YouTubeHeader/MLFormat.h>
-#import <YouTubeHeader/QTMIcon.h>
-#import <YouTubeHeader/UIView+YouTube.h>
 #import <YouTubeHeader/YTColor.h>
-#import <YouTubeHeader/YTCommonUtils.h>
 #import <YouTubeHeader/YTMainAppVideoPlayerOverlayViewController.h>
 #import <YouTubeHeader/YTQTMButton.h>
 #import <YouTubeHeader/YTSettingsGroupData.h>
@@ -10,25 +6,23 @@
 #import <YouTubeHeader/YTSettingsSectionItem.h>
 #import <YouTubeHeader/YTSettingsSectionItemManager.h>
 #import <YouTubeHeader/YTSettingsViewController.h>
-#import <YouTubeHeader/YTSingleVideoController.h>
 #import <YouTubeHeader/YTTypeStyle.h>
 #import "Header.h"
+#import "Init.h"
 
 static const NSInteger YTVideoOverlaySection = 1222;
 
-NSMutableArray <NSString *> *tweaks;
+NSMutableDictionary <NSString *, NSDictionary *> *tweaksMetadata;
 NSMutableArray <NSString *> *topButtons;
 NSMutableArray <NSString *> *bottomButtons;
 
 static NSBundle *TweakBundle(NSString *name) {
     NSString *tweakBundlePath = [[NSBundle mainBundle] pathForResource:name ofType:@"bundle"];
-    return tweakBundlePath
-        ? [NSBundle bundleWithPath:tweakBundlePath]
-        : [NSBundle bundleWithPath:[NSString stringWithFormat:ROOT_PATH_NS(@"/Library/Application Support/%@.bundle"), name]];
+    return [NSBundle bundleWithPath:tweakBundlePath ?: [NSString stringWithFormat:PS_ROOT_PATH_NS(@"/Library/Application Support/%@.bundle"), name]];
 }
 
 static NSString *EnabledKey(NSString *name) {
-    return [NSString stringWithFormat:@"YTVideoOverlay-%@-Enabled", name];
+    return tweaksMetadata[name][ToggleKey] ?: [NSString stringWithFormat:@"YTVideoOverlay-%@-Enabled", name];
 }
 
 static BOOL TweakEnabled(NSString *name) {
@@ -43,6 +37,14 @@ static int ButtonPosition(NSString *name) {
     return [[NSUserDefaults standardUserDefaults] integerForKey:PositionKey(name)];
 }
 
+static NSString *OrderKey(NSString *name) {
+    return [NSString stringWithFormat:@"YTVideoOverlay-%@-Order", name];
+}
+
+static int ButtonOrder(NSString *name) {
+    return [[NSUserDefaults standardUserDefaults] integerForKey:OrderKey(name)];
+}
+
 static BOOL UseTopButton(NSString *name) {
     return TweakEnabled(name) && ButtonPosition(name) == 0;
 }
@@ -54,20 +56,22 @@ static BOOL UseBottomButton(NSString *name) {
 static NSMutableArray *topControls(YTMainAppControlsOverlayView *self, NSMutableArray *controls) {
     for (NSString *name in topButtons) {
         if (UseTopButton(name))
-            [controls insertObject:[self button:name] atIndex:0];
+            [controls insertObject:self.overlayButtons[name] atIndex:0];
     }
     return controls;
 }
 
 static void setDefaultTextStyle(YTQTMButton *button) {
-    [button setTitleColor:[%c(YTColor) white1] forState:0];
+    [button setTitleColor:[%c(YTColor) white1] forState:UIControlStateNormal];
     YTDefaultTypeStyle *defaultTypeStyle = [%c(YTTypeStyle) defaultTypeStyle];
     UIFont *font = [defaultTypeStyle respondsToSelector:@selector(ytSansFontOfSize:weight:)]
         ? [defaultTypeStyle ytSansFontOfSize:10 weight:UIFontWeightSemibold]
         : [defaultTypeStyle fontOfSize:10 weight:UIFontWeightSemibold];
     button.titleLabel.font = font;
-    button.titleLabel.numberOfLines = 3;
     button.titleLabel.textAlignment = NSTextAlignmentCenter;
+    CGRect frame = button.frame;
+    frame.size.width = OVERLAY_BUTTON_SIZE;
+    button.frame = frame;
 }
 
 static YTQTMButton *createButtonTop(BOOL isText, YTMainAppControlsOverlayView *self, NSString *buttonId, NSString *accessibilityLabel, SEL selector) {
@@ -78,8 +82,6 @@ static YTQTMButton *createButtonTop(BOOL isText, YTMainAppControlsOverlayView *s
         button = [%c(YTQTMButton) textButton];
         button.accessibilityLabel = accessibilityLabel;
         button.verticalContentPadding = padding;
-        [button setTitle:@"Auto" forState:0];
-        [button sizeToFit];
         setDefaultTextStyle(button);
     } else {
         UIImage *image = [self buttonImage:buttonId];
@@ -108,7 +110,7 @@ static YTQTMButton *createButtonBottom(BOOL isText, YTInlinePlayerBarContainerVi
     } else {
         UIImage *image = [self buttonImage:buttonId];
         button = [%c(YTQTMButton) iconButton];
-        [button setImage:image forState:0];
+        [button setImage:image forState:UIControlStateNormal];
         [button sizeToFit];
     }
     button.hidden = YES;
@@ -132,27 +134,59 @@ static YTQTMButton *createButtonBottom(BOOL isText, YTInlinePlayerBarContainerVi
     YTMainAppVideoPlayerOverlayView *v = [self videoPlayerOverlayView];
     YTMainAppControlsOverlayView *c = [v valueForKey:@"_controlsOverlayView"];
     for (NSString *name in topButtons)
-        [c button:name].hidden = !UseTopButton(name);
+        c.overlayButtons[name].hidden = !UseTopButton(name);
     [c setNeedsLayout];
 }
 
 %end
 
+static NSMutableDictionary <NSString *, YTQTMButton *> *createOverlayButtons(BOOL isTop, id self) {
+    NSMutableDictionary <NSString *, YTQTMButton *> *overlayButtons = [NSMutableDictionary dictionary];
+    for (NSString *name in [tweaksMetadata allKeys]) {
+        NSDictionary *metadata = tweaksMetadata[name];
+        SEL selector = NSSelectorFromString(metadata[SelectorKey]);
+        BOOL asText = [metadata[AsTextKey] boolValue];
+        NSString *accessibilityLabel = metadata[AccessibilityLabelKey];
+        YTQTMButton *button;
+        if (isTop)
+            button = createButtonTop(asText, (YTMainAppControlsOverlayView *)self, name, accessibilityLabel, selector);
+        else
+            button = createButtonBottom(asText, (YTInlinePlayerBarContainerView *)self, name, accessibilityLabel, selector);
+        overlayButtons[name] = button;
+    }
+    return overlayButtons;
+}
+
+static void sortButtons(NSMutableArray <NSString *> *buttons) {
+    [buttons sortUsingComparator:^NSComparisonResult (NSString *a, NSString *b) {
+        int orderA = ButtonOrder(a);
+        int orderB = ButtonOrder(b);
+        if (orderA == 0 && orderB == 0)
+            return [a caseInsensitiveCompare:b];
+        if (orderA == 0)
+            return NSOrderedDescending;
+        if (orderB == 0)
+            return NSOrderedAscending;
+        return orderA < orderB ? NSOrderedAscending : NSOrderedDescending;
+    }];
+}
+
 %hook YTMainAppControlsOverlayView
 
-%new(@@:@@@:)
-- (YTQTMButton *)createButton:(NSString *)buttonId accessibilityLabel:(NSString *)accessibilityLabel selector:(SEL)selector {
-    return createButtonTop(NO, self, buttonId, accessibilityLabel, selector);
+%property (retain, nonatomic) NSMutableDictionary *overlayButtons;
+
+- (id)initWithDelegate:(id)delegate {
+    self = %orig;
+    self.overlayButtons = createOverlayButtons(YES, self);
+    sortButtons(topButtons);
+    return self;
 }
 
-%new(@@:@@@:)
-- (YTQTMButton *)createTextButton:(NSString *)buttonId accessibilityLabel:(NSString *)accessibilityLabel selector:(SEL)selector {
-    return createButtonTop(YES, self, buttonId, accessibilityLabel, selector);
-}
-
-%new(@@:@)
-- (YTQTMButton *)button:(NSString *)tweakId {
-    return nil;
+- (id)initWithDelegate:(id)delegate autoplaySwitchEnabled:(BOOL)autoplaySwitchEnabled {
+    self = %orig;
+    self.overlayButtons = createOverlayButtons(YES, self);
+    sortButtons(topButtons);
+    return self;
 }
 
 %new(@@:@)
@@ -171,7 +205,7 @@ static YTQTMButton *createButtonBottom(BOOL isText, YTInlinePlayerBarContainerVi
 - (void)setTopOverlayVisible:(BOOL)visible isAutonavCanceledState:(BOOL)canceledState {
     CGFloat alpha = canceledState || !visible ? 0.0 : 1.0;
     for (NSString *name in topButtons)
-        [self button:name].alpha = UseTopButton(name) ? alpha : 0;
+        self.overlayButtons[name].alpha = UseTopButton(name) ? alpha : 0;
     %orig;
 }
 
@@ -183,19 +217,13 @@ static YTQTMButton *createButtonBottom(BOOL isText, YTInlinePlayerBarContainerVi
 
 %hook YTInlinePlayerBarContainerView
 
-%new(@@:@@@:)
-- (YTQTMButton *)createButton:(NSString *)buttonId accessibilityLabel:(NSString *)accessibilityLabel selector:(SEL)selector {
-    return createButtonBottom(NO, self, buttonId, accessibilityLabel, selector);
-}
+%property (retain, nonatomic) NSMutableDictionary *overlayButtons;
 
-%new(@@:@@@:)
-- (YTQTMButton *)createTextButton:(NSString *)buttonId accessibilityLabel:(NSString *)accessibilityLabel selector:(SEL)selector {
-    return createButtonBottom(YES, self, buttonId, accessibilityLabel, selector);
-}
-
-%new(@@:@)
-- (YTQTMButton *)button:(NSString *)tweakId {
-    return nil;
+- (id)init {
+    self = %orig;
+    self.overlayButtons = createOverlayButtons(NO, self);
+    sortButtons(bottomButtons);
+    return self;
 }
 
 %new(@@:@)
@@ -207,7 +235,7 @@ static YTQTMButton *createButtonBottom(BOOL isText, YTInlinePlayerBarContainerVi
     NSMutableArray *icons = %orig;
     for (NSString *name in bottomButtons) {
         if (UseBottomButton(name)) {
-            YTQTMButton *button = [self button:name];
+            YTQTMButton *button = self.overlayButtons[name];
             [icons insertObject:button atIndex:0];
         }
     }
@@ -217,16 +245,24 @@ static YTQTMButton *createButtonBottom(BOOL isText, YTInlinePlayerBarContainerVi
 - (void)updateIconVisibility {
     %orig;
     for (NSString *name in bottomButtons) {
-        if (UseBottomButton(name))
-            [self button:name].hidden = NO;
+        if (UseBottomButton(name)) {
+            YTQTMButton *button = self.overlayButtons[name];
+            button.hidden = NO;
+            if (tweaksMetadata[name][UpdateImageOnVisibleKey])
+                [button setImage:[self buttonImage:name] forState:UIControlStateNormal];
+        }
     }
 }
 
 - (void)updateIconsHiddenAttribute {
     %orig;
     for (NSString *name in bottomButtons) {
-        if (UseBottomButton(name))
-            [self button:name].hidden = NO;
+        if (UseBottomButton(name)) {
+            YTQTMButton *button = self.overlayButtons[name];
+            button.hidden = NO;
+            if (tweaksMetadata[name][UpdateImageOnVisibleKey])
+                [button setImage:[self buttonImage:name] forState:UIControlStateNormal];
+        }
     }
 }
 
@@ -234,7 +270,7 @@ static YTQTMButton *createButtonBottom(BOOL isText, YTInlinePlayerBarContainerVi
     %orig;
     for (NSString *name in bottomButtons) {
         if (UseBottomButton(name))
-            [self button:name].alpha = 0;
+            self.overlayButtons[name].alpha = 0;
     }
 }
 
@@ -242,7 +278,7 @@ static YTQTMButton *createButtonBottom(BOOL isText, YTInlinePlayerBarContainerVi
     %orig;
     for (NSString *name in bottomButtons) {
         if (UseBottomButton(name))
-            [self button:name].alpha = visible ? 1 : 0;
+            self.overlayButtons[name].alpha = visible ? 1 : 0;
     }
 }
 
@@ -250,7 +286,7 @@ static YTQTMButton *createButtonBottom(BOOL isText, YTInlinePlayerBarContainerVi
     %orig;
     for (NSString *name in bottomButtons) {
         if (UseBottomButton(name))
-            [self button:name].alpha = visible ? 1 : 0;
+            self.overlayButtons[name].alpha = visible ? 1 : 0;
     }
 }
 
@@ -258,7 +294,7 @@ static YTQTMButton *createButtonBottom(BOOL isText, YTInlinePlayerBarContainerVi
     %orig;
     for (NSString *name in bottomButtons) {
         if (UseBottomButton(name))
-            [self button:name].alpha = visible ? 1 : 0;
+            self.overlayButtons[name].alpha = visible ? 1 : 0;
     }
 }
 
@@ -266,24 +302,38 @@ static YTQTMButton *createButtonBottom(BOOL isText, YTInlinePlayerBarContainerVi
     %orig;
     CGFloat multiFeedWidth = [self respondsToSelector:@selector(multiFeedElementView)] ? [self multiFeedElementView].frame.size.width : 0;
     YTQTMButton *enter = [self enterFullscreenButton];
-    CGFloat shift = 0;
+    CGFloat fullscreenButtonWidth = 0;
+    CGFloat fullscreenImageWidth = 0;
     CGRect frame = CGRectZero;
     if ([enter yt_isVisible]) {
         frame = enter.frame;
-        shift = multiFeedWidth + (2 * frame.size.width);
+        fullscreenButtonWidth = frame.size.width;
+        fullscreenImageWidth = enter.currentImage.size.width;
     } else {
         YTQTMButton *exit = [self exitFullscreenButton];
         if ([exit yt_isVisible]) {
             frame = exit.frame;
-            shift = multiFeedWidth + (2 * frame.size.width);
+            fullscreenButtonWidth = frame.size.width;
+            fullscreenImageWidth = exit.currentImage.size.width;
         }
     }
     if (CGRectIsEmpty(frame) || frame.origin.x <= 0 || frame.origin.y < -4) return;
-    frame.origin.x -= shift;
+    CGFloat gap = fullscreenButtonWidth > fullscreenImageWidth ? 12 : fullscreenButtonWidth;
+    frame.origin.x -= gap + multiFeedWidth + fullscreenButtonWidth;
+    UIView *peekableView = [self peekableView];
     for (NSString *name in bottomButtons) {
         if (UseBottomButton(name)) {
-            [self button:name].frame = frame;
-            frame.origin.x -= (2 * frame.size.width);
+            YTQTMButton *button = self.overlayButtons[name];
+            if (self.layout == 3 && button.superview == self) {
+                [button removeFromSuperview];
+                [peekableView addSubview:button];
+            }
+            if (self.layout != 3 && button.superview == peekableView) {
+                [button removeFromSuperview];
+                [self addSubview:button];
+            }
+            button.frame = frame;
+            frame.origin.x -= frame.size.width + gap;
             if (frame.origin.x < 0) frame.origin.x = 0;
         }
     }
@@ -324,9 +374,9 @@ static YTQTMButton *createButtonBottom(BOOL isText, YTInlinePlayerBarContainerVi
 
 %hook YTSettingsSectionItemManager
 
-%new(v@:@)
-+ (void)registerTweak:(NSString *)tweakId {
-    [tweaks addObject:tweakId];
+%new(v@:@@)
++ (void)registerTweak:(NSString *)tweakId metadata:(NSDictionary *)metadata {
+    tweaksMetadata[tweakId] = metadata;
 }
 
 %new(v@:@)
@@ -335,31 +385,47 @@ static YTQTMButton *createButtonBottom(BOOL isText, YTInlinePlayerBarContainerVi
     NSBundle *tweakBundle = TweakBundle(@"YTVideoOverlay");
     Class YTSettingsSectionItemClass = %c(YTSettingsSectionItem);
     YTSettingsViewController *settingsViewController = [self valueForKey:@"_settingsViewControllerDelegate"];
-    for (NSString *name in tweaks) {
+    NSArray <NSString *> *sortedKeys = [[tweaksMetadata allKeys] sortedArrayUsingSelector:@selector(caseInsensitiveCompare:)];
+    for (NSString *name in sortedKeys) {
         NSBundle *bundle = TweakBundle(name);
-        YTSettingsSectionItem *master = [YTSettingsSectionItemClass switchItemWithTitle:_LOC(bundle, @"ENABLED")
-            titleDescription:nil
+        YTSettingsSectionItem *header = [YTSettingsSectionItemClass itemWithTitle:name
             accessibilityIdentifier:nil
-            switchOn:TweakEnabled(name)
-            switchBlock:^BOOL (YTSettingsCell *cell, BOOL enabled) {
-                [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:EnabledKey(name)];
-                return YES;
-            }
-            settingItemId:0];
-        [sectionItems addObject:master];
+            detailTextBlock:nil
+            selectBlock:nil];
+        header.enabled = NO;
+        [sectionItems addObject:header];
+        NSDictionary *metadata = tweaksMetadata[name];
+
+        // Toggle
+        if (metadata[ToggleKey] == nil) {
+            YTSettingsSectionItem *master = [YTSettingsSectionItemClass switchItemWithTitle:_LOC(bundle, @"ENABLED")
+                titleDescription:nil
+                accessibilityIdentifier:nil
+                switchOn:TweakEnabled(name)
+                switchBlock:^BOOL (YTSettingsCell *cell, BOOL enabled) {
+                    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:EnabledKey(name)];
+                    return YES;
+                }
+                settingItemId:0];
+            [sectionItems addObject:master];
+        }
+
+        // Position
+        NSString *topText = LOC(@"TOP");
+        NSString *bottomText = LOC(@"BOTTOM");
         YTSettingsSectionItem *position = [YTSettingsSectionItemClass itemWithTitle:_LOC(bundle, @"POSITION")
             accessibilityIdentifier:nil
             detailTextBlock:^NSString *() {
-                return ButtonPosition(name) ? LOC(@"BOTTOM") : LOC(@"TOP");
+                return ButtonPosition(name) ? bottomText : topText;
             }
             selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
                 NSArray <YTSettingsSectionItem *> *rows = @[
-                    [YTSettingsSectionItemClass checkmarkItemWithTitle:LOC(@"TOP") titleDescription:LOC(@"TOP_DESC") selectBlock:^BOOL (YTSettingsCell *top, NSUInteger arg1) {
+                    [YTSettingsSectionItemClass checkmarkItemWithTitle:topText titleDescription:LOC(@"TOP_DESC") selectBlock:^BOOL (YTSettingsCell *top, NSUInteger arg1) {
                         [[NSUserDefaults standardUserDefaults] setInteger:0 forKey:PositionKey(name)];
                         [settingsViewController reloadData];
                         return YES;
                     }],
-                    [YTSettingsSectionItemClass checkmarkItemWithTitle:LOC(@"BOTTOM") titleDescription:LOC(@"BOTTOM_DESC") selectBlock:^BOOL (YTSettingsCell *bottom, NSUInteger arg1) {
+                    [YTSettingsSectionItemClass checkmarkItemWithTitle:bottomText titleDescription:LOC(@"BOTTOM_DESC") selectBlock:^BOOL (YTSettingsCell *bottom, NSUInteger arg1) {
                         [[NSUserDefaults standardUserDefaults] setInteger:1 forKey:PositionKey(name)];
                         [settingsViewController reloadData];
                         return YES;
@@ -370,6 +436,55 @@ static YTQTMButton *createButtonBottom(BOOL isText, YTInlinePlayerBarContainerVi
                 return YES;
             }];
         [sectionItems addObject:position];
+
+        // Order
+        NSString *orderText = LOC(@"ORDER");
+        NSString *orderNoneText = LOC(@"ORDER_NONE");
+        YTSettingsSectionItem *order = [YTSettingsSectionItemClass itemWithTitle:orderText
+            accessibilityIdentifier:nil
+            detailTextBlock:^NSString *() {
+                int orderValue = ButtonOrder(name);
+                return orderValue ? [NSString stringWithFormat:@"%d", orderValue] : orderNoneText;
+            }
+            selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
+                int count = tweaksMetadata.count;
+                NSMutableArray <YTSettingsSectionItem *> *rows = [NSMutableArray arrayWithCapacity:count + 1];
+                for (int i = 0; i <= count; ++i) {
+                    NSString *title = i == 0 ? orderNoneText : [NSString stringWithFormat:@"%d", i];
+                    [rows addObject:[YTSettingsSectionItemClass checkmarkItemWithTitle:title titleDescription:nil selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
+                        [[NSUserDefaults standardUserDefaults] setInteger:i forKey:OrderKey(name)];
+                        [settingsViewController reloadData];
+                        sortButtons(topButtons);
+                        sortButtons(bottomButtons);
+                        return YES;
+                    }]];
+                }
+                int selectedItemIndex = ButtonOrder(name);;
+                if (selectedItemIndex >= count) selectedItemIndex = 0;
+                NSString *pickerTitle = [NSString stringWithFormat:@"%@ - %@", orderText, name];
+                YTSettingsPickerViewController *picker = [[%c(YTSettingsPickerViewController) alloc] initWithNavTitle:pickerTitle pickerSectionTitle:nil rows:rows selectedItemIndex:selectedItemIndex parentResponder:[self parentResponder]];
+                [settingsViewController pushViewController:picker];
+                return YES;
+            }];
+        [sectionItems addObject:order];
+
+        // Extra boolean settings
+        if (metadata[ExtraBooleanKeys]) {
+            for (NSString *key in metadata[ExtraBooleanKeys]) {
+                NSString *titleKey = [NSString stringWithFormat:@"%@_KEY", key];
+                NSString *descriptionKey = [NSString stringWithFormat:@"%@_KEY_DESC", key];
+                YTSettingsSectionItem *extra = [YTSettingsSectionItemClass switchItemWithTitle:_LOC(bundle, titleKey)
+                    titleDescription:_LOC(bundle, descriptionKey)
+                    accessibilityIdentifier:nil
+                    switchOn:[[NSUserDefaults standardUserDefaults] boolForKey:key]
+                    switchBlock:^BOOL (YTSettingsCell *cell, BOOL enabled) {
+                        [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:key];
+                        return YES;
+                    }
+                    settingItemId:0];
+                [sectionItems addObject:extra];
+            }
+        }
     }
     NSString *title = LOC(@"VIDEO_OVERLAY");
     if ([settingsViewController respondsToSelector:@selector(setSectionItems:forCategory:title:icon:titleDescription:headerHidden:)]) {
@@ -393,7 +508,7 @@ static YTQTMButton *createButtonBottom(BOOL isText, YTInlinePlayerBarContainerVi
 %end
 
 %ctor {
-    tweaks = [NSMutableArray array];
+    tweaksMetadata = [NSMutableDictionary dictionary];
     topButtons = [NSMutableArray array];
     bottomButtons = [NSMutableArray array];
     %init(Settings);
@@ -402,7 +517,7 @@ static YTQTMButton *createButtonBottom(BOOL isText, YTInlinePlayerBarContainerVi
 }
 
 %dtor {
-    [tweaks removeAllObjects];
+    [tweaksMetadata removeAllObjects];
     [topButtons removeAllObjects];
     [bottomButtons removeAllObjects];
 }
